@@ -360,3 +360,44 @@ test('member capabilities cannot enroll across salons or bypass reward permissio
     assert.equal((await request('/api/members/'+token,'GET',undefined,null)).data.member.stamps,0);
   } finally {sqlite.close();}
 });
+
+test('reservation APIs isolate contact details and enforce salon-scoped owner settings',async()=>{
+ const {sqlite,request}=fixture();try{
+ const id=(await request('/api/salons')).data.shops[0].id;
+ const endpoint=`/api/salons/${id}/reservations`;
+ const settings={action:'settings',enabled:true,weekdays:[0,1,2,3,4,5,6],startTime:'10:00',endTime:'19:00',interval:30,noticeMinutes:0};
+ assert.equal((await request(endpoint,'PATCH',settings,'owner-b')).status,403);
+ assert.equal((await request(endpoint+'?manage=1','GET',undefined,null)).status,401);
+ assert.equal((await request(endpoint+'?manage=1','GET',undefined,'owner-b')).status,403);
+ assert.equal((await request(endpoint,'PATCH',settings)).status,200);
+ const date=new Date(Date.now()+9*3600000+86400000).toISOString().slice(0,10);
+ const startsAt=Date.parse(date+'T10:00:00+09:00');
+ const req={requestId:crypto.randomUUID(),realName:'예약실명',phone:'010-4567-8910',privacyConsent:true,serviceIds:['mens-cut'],startsAt};
+ const created=await request(endpoint,'POST',req,null);assert.equal(created.status,201);
+ const data=created.data as unknown as {reservation:{token:string;phoneMasked:string}};
+ const token=data.reservation.token;assert.equal(data.reservation.phoneMasked,'010-****-8910');
+ const pub=await request(endpoint+`?date=${date}&serviceId=mens-cut`,'GET',undefined,null);
+ assert.equal(pub.status,200);assert.ok(!JSON.stringify(pub.data).includes('예약실명'));assert.ok(!JSON.stringify(pub.data).includes('4567'));assert.ok(!JSON.stringify(pub.data).includes(token));
+ const owner=await request(endpoint+'?manage=1');assert.match(JSON.stringify(owner.data),/01045678910/);assert.ok(!JSON.stringify(owner.data).includes(token));
+ assert.ok(!JSON.stringify((await request(`/api/salons/${id}`,'GET',undefined,null)).data).includes('예약실명'));
+ assert.equal((await request('/api/reservations/not-a-token','GET',undefined,null)).status,404);
+ assert.equal((await request('/api/reservations/'+token,'GET',undefined,null)).status,200);
+ assert.equal((await request(endpoint,'POST',req,null)).status,201);
+ assert.equal((await request(endpoint,'POST',{...req,realName:'다른사람'},null)).status,409);
+ assert.equal((await request('/api/reservations/'+token,'PATCH',{action:'checkIn'},null)).status,400);
+ assert.equal((await request('/api/reservations/'+token,'PATCH',{action:'cancel'},null)).status,200);
+ assert.equal((await request(endpoint,'POST',{...req,requestId:crypto.randomUUID()},null)).status,201);
+ }finally{sqlite.close();}
+});
+
+test('SQL CAS admits exactly one simultaneous reservation per occupied service interval',async()=>{
+ const {sqlite,request}=fixture();try{
+ const id=(await request('/api/salons')).data.shops[0].id,endpoint=`/api/salons/${id}/reservations`;
+ await request(endpoint,'PATCH',{action:'settings',enabled:true,weekdays:[0,1,2,3,4,5,6],startTime:'10:00',endTime:'19:00',interval:30,noticeMinutes:0});
+ const date=new Date(Date.now()+9*3600000+86400000).toISOString().slice(0,10);
+ const req={requestId:crypto.randomUUID(),realName:'홍길동',phone:'01012345678',privacyConsent:true,serviceIds:['color'],startsAt:Date.parse(date+'T10:00:00+09:00')};
+ const results=await Promise.all([request(endpoint,'POST',req,null),request(endpoint,'POST',{...req,requestId:crypto.randomUUID(),startsAt:req.startsAt+30*60000},null)]);
+ assert.deepEqual(results.map(r=>r.status).sort(),[201,409]);
+ const stored=JSON.parse(String(sqlite.prepare('SELECT state FROM shops WHERE id=?').get(id)!.state));assert.equal(stored.reservations.length,1);
+ }finally{sqlite.close();}
+});

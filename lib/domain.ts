@@ -1,3 +1,4 @@
+import type {BookingSettings,Reservation} from './reservations.ts';
 export type Option = {id:string;name:string;values:{id:string;name:string;color?:string}[]};
 export type HairSelection = {gender:'female'|'male'|'consult';length:'short'|'medium'|'long'|'consult'};
 export type Service = {audience?:'all'|'female'|'male';hairLengthEnabled?:boolean;id:string;name:string;description:string;price:number;duration:number;category:string;icon:string;options:Option[]};
@@ -5,7 +6,7 @@ export type Status = 'pending'|'waiting'|'called'|'serving'|'held'|'completed'|'
 export type LoyaltySettings={enabled:boolean;target:number;benefit:string};
 export type Member={id:string;token:string;nickname:string;stamps:number;lifetimeVisits:number;ledger:{id:string;kind:'earn'|'redeem';delta:number;ticketId?:string;at:number;requestId?:string}[]};
 export type Ticket = {nickname?:string;displayName?:string;memberId?:string;loyaltyEligible?:boolean;loyaltyEarned?:boolean;hair?:HairSelection;id:string;token:string;requestId:string;requestSignature:string;queueOrder?:number;priceConfirmed?:boolean;number:number;status:Status;items:{name:string;price:number;duration:number;options:string[]}[];total:number;duration:number;createdAt:number;startedAt?:number;completedAt?:number;calledAt?:number;remainingAt?:number;remainingMinutes?:number;consult:boolean;previousStatus?:Status;audit:{at:number;action:string;before?:number;after?:number}[]};
-export type Shop = {id:string;ownerId:string;name:string;subtitle:string;menu:Service[];settings:{loyalty?:LoyaltySettings;phase:'open'|'paused'|'closed';thresholds:{busy:number;veryBusy:number};comboDiscount:number};state:{members?:Member[];tickets:Ticket[];nextNumber:number};revision:number;updatedAt:number};
+export type Shop = {id:string;ownerId:string;name:string;subtitle:string;menu:Service[];settings:{reservations?:BookingSettings;loyalty?:LoyaltySettings;phase:'open'|'paused'|'closed';thresholds:{busy:number;veryBusy:number};comboDiscount:number};state:{reservations?:Reservation[];members?:Member[];tickets:Ticket[];nextNumber:number};revision:number;updatedAt:number};
 export class DomainError extends Error {status:number;constructor(message:string,status=400){super(message);this.status=status;}}
 export const defaultMenu:Service[] = [
 {id:'mens-cut',name:'남성 커트',description:'깔끔하게 다듬는 나만의 스타일',price:18000,duration:20,category:'커트',icon:'scissors',options:[{id:'style',name:'스타일',values:[{id:'natural',name:'내추럴'},{id:'dandy',name:'댄디'},{id:'crop',name:'크롭'}]}]},

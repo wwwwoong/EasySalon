@@ -1,5 +1,6 @@
+import {addReservation,availability,bookingSettings,manageReservation,reservationReceipt,cancelOwnReservation,ownerReservations} from './reservations.ts';
 import {addTicket,DomainError,ownerCommand,publicShop,queueSummary,stats,ticketView,makeShop,revenueReport,ownerView,membershipView,memberCardCode,ticketDisplayName,loyaltySettings,type Shop} from './domain.ts';
-import {findByToken,findShop,initialize,mutate,ownedShops,allShops,insertShop,platformSettings,validatePlatform,savePlatform,findMemberByToken} from './repository.ts';
+import {findByToken,findShop,initialize,mutate,ownedShops,allShops,insertShop,platformSettings,validatePlatform,savePlatform,findMemberByToken,findReservationByToken} from './repository.ts';
 const headers={'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store, private','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer'};
 function json(value:unknown,status=200){return new Response(JSON.stringify(value),{status,headers});}
 function identity(request:Request){const id=request.headers.get('oai-authenticated-user-id');if(!id)throw new DomainError('로그인이 필요합니다.',401);return id;}
@@ -63,6 +64,34 @@ export async function handleApi(request:Request,db:D1Database,config:ApiConfig={
  const shop=makeShop(user,shopName(input.name));await insertShop(db,shop);return json({shops:await list()},201);
  }
  throw new DomainError('작업을 확인해 주세요.');
+ }
+ }
+ const bookingToken=path.match(/^\/api\/reservations\/([^/]+)$/);
+ if(bookingToken&&(method==='GET'||method==='PATCH')){
+ const token=decodeURIComponent(bookingToken[1]);const found=await findReservationByToken(db,token);
+ if(method==='GET')return json({reservation:reservationReceipt(found.shop,found.reservation)});
+ const input=await body(request);if(input.action!=='cancel')throw new DomainError('예약 작업을 확인해 주세요.');
+ const {shop,result}=await mutate(db,found.shop.id,s=>cancelOwnReservation(s,token));
+ return json({reservation:reservationReceipt(shop,result)});
+ }
+ const bookingPath=path.match(/^\/api\/salons\/([^/]+)\/reservations$/);
+ if(bookingPath){
+ const id=decodeURIComponent(bookingPath[1]);
+ if(method==='GET'){
+ const shop=await findShop(db,id);
+ if(url.searchParams.get('manage')==='1'){await owner(request,shop,db,config);return json({settings:bookingSettings(shop),reservations:ownerReservations(shop)});}
+ if(!url.searchParams.has('date'))return json({settings:bookingSettings(shop)});
+ return json(availability(shop,url.searchParams.get('date'),url.searchParams.getAll('serviceId')));
+ }
+ if(method==='POST'){
+ const input=await body(request),platform=await platformSettings(db);
+ const {shop,result}=await mutate(db,id,s=>{if(platform.maintenance&&!s.state.reservations?.some(r=>r.requestId===input.requestId))throw new DomainError('시스템 점검 중입니다. 잠시 후 예약해 주세요.',503);return addReservation(s,input);});
+ return json({reservation:reservationReceipt(shop,result)},201);
+ }
+ if(method==='PATCH'){
+ const user=identity(request),input=await body(request);await owner(request,await findShop(db,id),db,config);
+ const {shop}=await mutate(db,id,s=>{if(!master(request,config)&&s.ownerId!==user)throw new DomainError('매장 권한이 없습니다.',403);manageReservation(s,input);});
+ return json({settings:bookingSettings(shop),reservations:ownerReservations(shop)});
  }
  }
  const memberMatch=path.match(/^\/api\/members\/([^/]+)$/);

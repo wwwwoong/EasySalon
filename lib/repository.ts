@@ -50,3 +50,10 @@ export async function findMemberByToken(db:D1Database,token:string){
  if(!row)throw new DomainError('적립 정보를 찾을 수 없습니다.',404);
  const shop=decode(row);return {shop,member:shop.state.members!.find(m=>m.token===token)!};
 }
+
+export async function findReservationByToken(db:D1Database,token:string){
+ if(!validCapability(token))throw new DomainError('예약을 찾을 수 없습니다.',404);
+ const row=await db.prepare("SELECT * FROM shops WHERE EXISTS (SELECT 1 FROM json_each(shops.state, '$.reservations') r WHERE json_extract(r.value, '$.token') = ?) LIMIT 1").bind(token).first<Row>();
+ if(!row)throw new DomainError('예약을 찾을 수 없습니다.',404);
+ const shop=decode(row);return {shop,reservation:shop.state.reservations!.find(r=>r.token===token)!};
+}

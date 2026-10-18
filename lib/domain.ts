@@ -1,3 +1,4 @@
+import type {SchedulerState,Stage} from './scheduler.ts';
 import type {BookingSettings,Reservation} from './reservations.ts';
 export type Option = {id:string;name:string;values:{id:string;name:string;color?:string}[]};
 export type HairSelection = {gender:'female'|'male'|'consult';length:'short'|'medium'|'long'|'consult'};
@@ -5,8 +6,8 @@ export type Service = {audience?:'all'|'female'|'male';hairLengthEnabled?:boolea
 export type Status = 'pending'|'waiting'|'called'|'serving'|'held'|'completed'|'cancelled';
 export type LoyaltySettings={enabled:boolean;target:number;benefit:string};
 export type Member={id:string;token:string;nickname:string;stamps:number;lifetimeVisits:number;ledger:{id:string;kind:'earn'|'redeem';delta:number;ticketId?:string;at:number;requestId?:string}[]};
-export type Ticket = {nickname?:string;displayName?:string;memberId?:string;loyaltyEligible?:boolean;loyaltyEarned?:boolean;hair?:HairSelection;id:string;token:string;requestId:string;requestSignature:string;queueOrder?:number;priceConfirmed?:boolean;number:number;status:Status;items:{name:string;price:number;duration:number;options:string[]}[];total:number;duration:number;createdAt:number;startedAt?:number;completedAt?:number;calledAt?:number;remainingAt?:number;remainingMinutes?:number;consult:boolean;previousStatus?:Status;audit:{at:number;action:string;before?:number;after?:number}[]};
-export type Shop = {id:string;ownerId:string;name:string;subtitle:string;menu:Service[];settings:{reservations?:BookingSettings;loyalty?:LoyaltySettings;phase:'open'|'paused'|'closed';thresholds:{busy:number;veryBusy:number};comboDiscount:number};state:{reservations?:Reservation[];members?:Member[];tickets:Ticket[];nextNumber:number};revision:number;updatedAt:number};
+export type Ticket = {stages?:Stage[];stageIndex?:number;stageStartedAt?:number;staffLabel?:string;staffId?:string;serviceIds?:string[];nickname?:string;displayName?:string;memberId?:string;loyaltyEligible?:boolean;loyaltyEarned?:boolean;hair?:HairSelection;id:string;token:string;requestId:string;requestSignature:string;queueOrder?:number;priceConfirmed?:boolean;number:number;status:Status;items:{name:string;price:number;duration:number;options:string[]}[];total:number;duration:number;createdAt:number;startedAt?:number;completedAt?:number;calledAt?:number;remainingAt?:number;remainingMinutes?:number;consult:boolean;previousStatus?:Status;audit:{at:number;action:string;before?:number;after?:number}[]};
+export type Shop = {id:string;ownerId:string;name:string;subtitle:string;menu:Service[];settings:{reservations?:BookingSettings;loyalty?:LoyaltySettings;phase:'open'|'paused'|'closed';thresholds:{busy:number;veryBusy:number};comboDiscount:number};state:{scheduler?:SchedulerState;reservations?:Reservation[];members?:Member[];tickets:Ticket[];nextNumber:number};revision:number;updatedAt:number};
 export class DomainError extends Error {status:number;constructor(message:string,status=400){super(message);this.status=status;}}
 export const defaultMenu:Service[] = [
 {id:'mens-cut',name:'남성 커트',description:'깔끔하게 다듬는 나만의 스타일',price:18000,duration:20,category:'커트',icon:'scissors',options:[{id:'style',name:'스타일',values:[{id:'natural',name:'내추럴'},{id:'dandy',name:'댄디'},{id:'crop',name:'크롭'}]}]},
@@ -21,6 +22,7 @@ const terminals:Status[]=['completed','cancelled'];
 export function remaining(t:Ticket,now:number):number|null {
  if(t.status==='called') return now-(t.calledAt??t.createdAt)>10*60000?null:t.duration;
  if(t.status!=='serving')return t.duration;
+ if(t.stages&&t.stageIndex!==undefined&&t.stageStartedAt!==undefined&&(t.remainingAt===undefined||t.remainingAt<t.stageStartedAt)){const stage=t.stages[t.stageIndex],elapsed=(now-t.stageStartedAt)/60000;if(elapsed>=stage.minutes)return null;return Math.ceil(stage.minutes-elapsed+t.stages.slice(t.stageIndex+1).reduce((sum,s)=>sum+s.minutes,0));}
  const at=t.remainingAt??t.startedAt??now;
  const duration=t.remainingMinutes??t.duration;
  const elapsed=(now-at)/60000;
@@ -69,7 +71,7 @@ export function addTicket(shop:Shop,input:Record<string,unknown>,owner:boolean,n
  (shop.state.members??=[]).push(linked);
  }
  if(linked&&nickname)linked.nickname=nickname;
- const ticket:Ticket={nickname:nickname||undefined,displayName:nickname||`손님${shop.state.nextNumber}`,memberId:linked?.id,loyaltyEligible:!!linked&&loyaltySettings(shop).enabled,loyaltyEarned:false,...(hair?{hair}:{}),id:crypto.randomUUID(),token:crypto.randomUUID()+crypto.randomUUID(),requestId:input.requestId,requestSignature:signature,queueOrder:input.source==='owner'?Math.max(0,...shop.state.tickets.map(t=>t.queueOrder??0))+1:undefined,number:shop.state.nextNumber++,status:input.source==='owner'?'waiting':'pending',items,total:Math.max(0,items.reduce((s,i)=>s+i.price,0)-(combo?shop.settings.comboDiscount:0)),duration:items.reduce((s,i)=>s+i.duration,0),createdAt:now,consult:input.consult===true,audit:[]};
+ const ticket:Ticket={serviceIds:input.serviceIds as string[],nickname:nickname||undefined,displayName:nickname||`손님${shop.state.nextNumber}`,memberId:linked?.id,loyaltyEligible:!!linked&&loyaltySettings(shop).enabled,loyaltyEarned:false,...(hair?{hair}:{}),id:crypto.randomUUID(),token:crypto.randomUUID()+crypto.randomUUID(),requestId:input.requestId,requestSignature:signature,queueOrder:input.source==='owner'?Math.max(0,...shop.state.tickets.map(t=>t.queueOrder??0))+1:undefined,number:shop.state.nextNumber++,status:input.source==='owner'?'waiting':'pending',items,total:Math.max(0,items.reduce((s,i)=>s+i.price,0)-(combo?shop.settings.comboDiscount:0)),duration:items.reduce((s,i)=>s+i.duration,0),createdAt:now,consult:input.consult===true,audit:[]};
  shop.state.tickets.push(ticket);return ticket;
 }
 const transitions:Partial<Record<string,Partial<Record<Status,Status>>>>={approve:{pending:'waiting'},call:{waiting:'called'},start:{waiting:'serving',called:'serving'},complete:{serving:'completed'},hold:{waiting:'held',called:'held'},resume:{held:'waiting'},cancel:{pending:'cancelled',waiting:'cancelled',called:'cancelled',held:'cancelled'}};
@@ -89,18 +91,41 @@ export function ownerCommand(shop:Shop,input:Record<string,unknown>,now=Date.now
  if(ticket.status==='completed'&&action==='complete')earnStamp(shop,ticket,now);
  if((ticket.status==='completed'&&action==='complete'&&(input.price===undefined||input.price===ticket.total))||(ticket.status==='cancelled'&&action==='cancel'))return;
  if(terminals.includes(ticket.status))throw new DomainError('종료된 접수는 상태를 변경할 수 없습니다.',409);
+ if(action==='stageNext'){
+ const profile=shop.state.scheduler?.active,index=ticket.stageIndex??0,next=ticket.stages?.[index+1];
+ if(typeof input.expectedStageIndex!=='number'||!Number.isInteger(input.expectedStageIndex)||input.expectedStageIndex<0)throw new DomainError('현재 시술 단계를 확인해 주세요.');
+ if(ticket.status==='serving'&&index===input.expectedStageIndex+1)return;
+ if(index!==input.expectedStageIndex)throw new DomainError('시술 단계가 변경되었습니다. 새로고침 후 확인해 주세요.',409);
+ if(ticket.status!=='serving'||!profile?.enabled||!next)throw new DomainError('다음 시술 단계가 없습니다.',409);
+ const others=shop.state.tickets.filter(t=>t.id!==ticket.id&&['called','serving'].includes(t.status));
+ if(next.needsStaff&&others.some(t=>(!t.staffId||t.staffId===ticket.staffId)&&(t.status==='called'||!t.stages||t.stages[t.stageIndex??0]?.needsStaff)))throw new DomainError('담당자가 다른 고객을 작업 중입니다. 먼저 마무리해 주세요.',409);
+ const resource=next.resource;
+ if(resource!=='none'&&others.filter(t=>(t.status==='called'?'chair':t.stages?.[t.stageIndex??0]?.resource??'chair')===resource).length>=(resource==='chair'?profile.chairs:profile.washBasins))throw new DomainError('다음 단계에 필요한 자리가 사용 중입니다.',409);
+ ticket.audit.push({at:now,action:'stage-next',before:index,after:index+1});ticket.stageIndex=index+1;ticket.stageStartedAt=now;ticket.remainingAt=undefined;ticket.remainingMinutes=undefined;return;
+ }
  if(action==='remaining'){
  if(ticket.status!=='serving'||typeof input.minutes!=='number'||!Number.isInteger(input.minutes)||input.minutes<0||input.minutes>600)throw new DomainError('남은 시간을 확인해 주세요.');
  ticket.remainingAt=now;ticket.remainingMinutes=input.minutes;ticket.audit.push({at:now,action,after:input.minutes});return;
  }
  const target=transitions[action]?.[ticket.status];if(!target)throw new DomainError('현재 상태에서 할 수 없는 작업입니다.',409);
- if((target==='called'||target==='serving')&&shop.state.tickets.some(t=>t.id!==ticket.id&&(t.status==='called'||t.status==='serving')))throw new DomainError('진행 중인 고객을 먼저 완료해 주세요.',409);
+ if(target==='called'||target==='serving'){
+ const profile=shop.state.scheduler?.active,active=shop.state.tickets.filter(t=>t.id!==ticket.id&&(t.status==='called'||t.status==='serving'));
+ if(profile?.enabled){
+ const day=new Date(now+9*3600000),clock=day.getUTCHours()*60+day.getUTCMinutes();
+ const ids=ticket.serviceIds??ticket.items.map(item=>shop.menu.find(m=>m.name===item.name)?.id??'');
+ const assigned=profile.staff.find(s=>(!ticket.staffId||s.id===ticket.staffId)&&s.weekdays.includes(day.getUTCDay())&&clock>=Number(s.startTime.slice(0,2))*60+Number(s.startTime.slice(3))&&clock<Number(s.endTime.slice(0,2))*60+Number(s.endTime.slice(3))&&ids.every(id=>s.serviceIds.includes(id))&&!active.some(t=>(!t.staffId||t.staffId===s.id)&&(t.status==='called'||!t.stages||t.stages[t.stageIndex??0]?.needsStaff)));
+ const firstResource=target==='called'?'chair':ticket.stages?.[0]?.resource??profile.services.find(s=>s.serviceId===ids[0])?.stages[0]?.resource??'chair';
+ if(!assigned||firstResource!=='none'&&active.filter(t=>(t.status==='called'?'chair':t.stages?.[t.stageIndex??0]?.resource??'chair')===firstResource).length>=(firstResource==='chair'?profile.chairs:profile.washBasins))throw new DomainError('현재 시술 가능한 담당자 또는 자리가 없습니다.',409);
+ ticket.staffId=assigned.id;ticket.staffLabel=assigned.label;
+ if(!ticket.stages){ticket.stages=ids.flatMap(id=>structuredClone(profile.services.find(s=>s.serviceId===id)?.stages??[]));if(profile.bufferMinutes)ticket.stages.push({name:'정리·여유',minutes:profile.bufferMinutes,needsStaff:true,resource:'chair'});if(!ticket.stages.length)throw new DomainError('시술 단계 설정을 확인해 주세요.',409);ticket.duration=ticket.stages.reduce((sum,s)=>sum+s.minutes,0);}
+ }else if(active.length)throw new DomainError('진행 중인 고객을 먼저 완료해 주세요.',409);
+ }
  if(target==='completed'&&ticket.consult&&!ticket.priceConfirmed&&input.price===undefined)throw new DomainError('상담 고객의 최종 금액을 먼저 확인해 주세요.',409);
  if(target==='completed'&&input.price!==undefined){if(typeof input.price!=='number'||!Number.isInteger(input.price)||input.price<0||input.price>10000000)throw new DomainError('금액을 확인해 주세요.');ticket.audit.push({at:now,action:'price',before:ticket.total,after:input.price});ticket.total=input.price;ticket.priceConfirmed=true;}
  ticket.audit.push({at:now,action});ticket.status=target;
  if(target==='waiting')ticket.queueOrder=Math.max(0,...shop.state.tickets.map(t=>t.queueOrder??0))+1;
  if(target==='called')ticket.calledAt=now;
- if(target==='serving')ticket.startedAt=now;
+ if(target==='serving'){ticket.startedAt=now;if(ticket.stages){ticket.stageIndex=0;ticket.stageStartedAt=now;}}
  if(target==='completed'||target==='cancelled')ticket.completedAt=now;
  if(target==='completed')earnStamp(shop,ticket,now);
 }

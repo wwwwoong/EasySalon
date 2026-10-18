@@ -1,10 +1,12 @@
+import {schedulerState,schedulerCommand,validateProfile,assertExistingFits} from './scheduler.ts';
+import {analyzeInterview,type SchedulerAI} from './scheduler-ai.ts';
 import {addReservation,availability,bookingSettings,manageReservation,reservationReceipt,cancelOwnReservation,ownerReservations} from './reservations.ts';
 import {addTicket,DomainError,ownerCommand,publicShop,queueSummary,stats,ticketView,makeShop,revenueReport,ownerView,membershipView,memberCardCode,ticketDisplayName,loyaltySettings,type Shop} from './domain.ts';
 import {findByToken,findShop,initialize,mutate,ownedShops,allShops,insertShop,platformSettings,validatePlatform,savePlatform,findMemberByToken,findReservationByToken} from './repository.ts';
 const headers={'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store, private','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer'};
 function json(value:unknown,status=200){return new Response(JSON.stringify(value),{status,headers});}
 function identity(request:Request){const id=request.headers.get('oai-authenticated-user-id');if(!id)throw new DomainError('로그인이 필요합니다.',401);return id;}
-type ApiConfig={masterUserIds:string[]};
+type ApiConfig={masterUserIds:string[];schedulerAI?:SchedulerAI};
 function master(request:Request,config:ApiConfig){const user=request.headers.get('oai-authenticated-user-id');return !!user&&config.masterUserIds.includes(user);}
 async function owner(request:Request,shop:Shop,db:D1Database,config:ApiConfig){const user=identity(request);if(master(request,config))return;const assigned=(await ownedShops(db,user))[0];if(user!==shop.ownerId||assigned?.id!==shop.id)throw new DomainError('담당 매장만 관리할 수 있습니다.',403);}
 async function body(request:Request):Promise<Record<string,unknown>>{
@@ -64,6 +66,30 @@ export async function handleApi(request:Request,db:D1Database,config:ApiConfig={
  const shop=makeShop(user,shopName(input.name));await insertShop(db,shop);return json({shops:await list()},201);
  }
  throw new DomainError('작업을 확인해 주세요.');
+ }
+ }
+ const schedulerPath=path.match(/^\/api\/salons\/([^/]+)\/scheduler$/);
+ if(schedulerPath){
+ const id=decodeURIComponent(schedulerPath[1]),shop=await findShop(db,id);await owner(request,shop,db,config);
+ if(method==='GET')return json({scheduler:schedulerState(shop),aiAvailable:!!config.schedulerAI?.key&&!!config.schedulerAI?.model});
+ const input=await body(request),user=identity(request);
+ if(method==='PATCH'){
+ const result=await mutate(db,id,s=>{if(!master(request,config)&&s.ownerId!==user)throw new DomainError('매장 권한이 없습니다.',403);schedulerCommand(s,input);});
+ return json({scheduler:schedulerState(result.shop)});
+ }
+ if(method==='POST'){
+ if(input.action==='preview'){
+ const profile=validateProfile(input.profile,shop);assertExistingFits(shop,profile);
+ const candidate=structuredClone(shop),state=schedulerState(candidate);state.active=profile;candidate.state.scheduler=state;
+ return json({before:availability(shop,input.date,input.serviceIds),after:availability(candidate,input.date,input.serviceIds)});
+ }
+ if(input.action!=='interview')throw new DomainError('인터뷰 작업을 확인해 주세요.');
+ if(!config.schedulerAI?.key||!config.schedulerAI.model)throw new DomainError('AI 연결 준비 중입니다. 마스터가 서버에 AI 키와 모델을 설정해야 합니다. 인터뷰와 운영표 직접 입력은 사용할 수 있습니다.',503);
+ if(typeof input.interview!=='string'||!input.interview.trim()||input.interview.length>6000)throw new DomainError('인터뷰 답변을 6000자 이내로 입력해 주세요.');
+ const reserved=await mutate(db,id,s=>{if(!master(request,config)&&s.ownerId!==user)throw new DomainError('매장 권한이 없습니다.',403);const state=schedulerState(s);if(Date.now()-(state.aiRequestedAt??0)<60000)throw new DomainError('AI 분석은 1분 간격으로 요청해 주세요.',429);state.aiRequestedAt=Date.now();s.state.scheduler=state;});
+ const analysis=await analyzeInterview(reserved.shop,input.interview,config.schedulerAI);
+ const result=await mutate(db,id,s=>{if(s.revision!==reserved.shop.revision)throw new DomainError('분석 중 매장 정보가 변경되었습니다. 최신 정보를 확인하고 다시 분석해 주세요.',409);if(!master(request,config)&&s.ownerId!==user)throw new DomainError('매장 권한이 없습니다.',403);const state=schedulerState(s);state.draft=analysis.profile;state.interview=input.interview as string;state.questions=analysis.questions;s.state.scheduler=state;});
+ return json({scheduler:schedulerState(result.shop),summary:analysis.summary});
  }
  }
  const bookingToken=path.match(/^\/api\/reservations\/([^/]+)$/);

@@ -7,7 +7,7 @@ import { type Shop, type Ticket, stats, publicShop, makeShop } from '../lib/doma
 import { insertShop } from '../lib/repository.ts';
 type TestPayload = { shops: (Pick<Shop, 'id' | 'name' | 'subtitle'> & {ownerId?:string})[]; shop: ReturnType<typeof publicShop>; tickets: Ticket[]; ticket: Ticket; stats: ReturnType<typeof stats>; notifications: {channel:string}[]; role:string; availableModes:string[]; platform:{brandName:string;accentColor:string;announcement:string;maintenance:boolean}; revenue:number; daily:{date:string;revenue:number;completed:number}[]; membership:{token:string;cardCode:string}; member:{cardCode:string;nickname:string;stamps:number;lifetimeVisits:number}; members:{id:string;cardCode:string;nickname:string;stamps:number;lifetimeVisits:number}[]; history:{kind:string;delta:number;at:number}[] }; 
 
-function fixture(config: {masterUserIds:string[]} = {masterUserIds:[]}) {
+function fixture(config: {masterUserIds:string[];schedulerAI?:import('../lib/scheduler-ai.ts').SchedulerAI} = {masterUserIds:[]}) {
   const sqlite = new DatabaseSync(':memory:');
   const migrationDir=new URL('../drizzle/',import.meta.url);
   for(const file of readdirSync(migrationDir).filter(f=>f.endsWith('.sql')).sort())sqlite.exec(readFileSync(new URL(file,migrationDir),'utf8'));
@@ -399,5 +399,41 @@ test('SQL CAS admits exactly one simultaneous reservation per occupied service i
  const results=await Promise.all([request(endpoint,'POST',req,null),request(endpoint,'POST',{...req,requestId:crypto.randomUUID(),startsAt:req.startsAt+30*60000},null)]);
  assert.deepEqual(results.map(r=>r.status).sort(),[201,409]);
  const stored=JSON.parse(String(sqlite.prepare('SELECT state FROM shops WHERE id=?').get(id)!.state));assert.equal(stored.reservations.length,1);
+ }finally{sqlite.close();}
+});
+
+test('scheduler policies and opinions are owner-scoped, preview is read-only, and parallel slots use SQL CAS',async()=>{
+ const {sqlite,request}=fixture();try{
+ const id=(await request('/api/salons')).data.shops[0].id,endpoint=`/api/salons/${id}/scheduler`;
+ assert.equal((await request(endpoint,'GET',undefined,null)).status,401);
+ assert.equal((await request(endpoint,'GET',undefined,'owner-b')).status,403);
+ assert.equal((await request(endpoint,'PATCH',{action:'analyze'},'owner-b')).status,403);
+ const initial=(await request(endpoint)).data as unknown as {scheduler:import('../lib/scheduler.ts').SchedulerState;aiAvailable:boolean};assert.equal(initial.aiAvailable,false);
+ const profile=initial.scheduler.draft;profile.staff[0].weekdays=[0,1,2,3,4,5,6];profile.staff.push({...structuredClone(profile.staff[0]),id:'worker-two',label:'직원 2'});
+ assert.equal((await request(endpoint,'PATCH',{action:'activate',profile,expectedVersion:0})).status,200);
+ assert.equal((await request(endpoint,'PATCH',{action:'activate',profile,expectedVersion:0})).status,409);
+ assert.equal((await request(endpoint,'POST',{action:'interview',interview:'두 명 근무'})).status,503);
+ const bookingPath=`/api/salons/${id}/reservations`;
+ await request(bookingPath,'PATCH',{action:'settings',enabled:true,weekdays:[0,1,2,3,4,5,6],startTime:'10:00',endTime:'19:00',interval:30,noticeMinutes:0});
+ const date=new Date(Date.now()+9*3600000+86400000).toISOString().slice(0,10),startsAt=Date.parse(date+'T10:00:00+09:00');
+ const before=sqlite.prepare('SELECT revision FROM shops WHERE id=?').get(id)!.revision;
+ assert.equal((await request(endpoint,'POST',{action:'preview',profile,date,serviceIds:['mens-cut']})).status,200);
+ assert.equal(sqlite.prepare('SELECT revision FROM shops WHERE id=?').get(id)!.revision,before);
+ const responses=await Promise.all(Array.from({length:3},()=>request(bookingPath,'POST',{requestId:crypto.randomUUID(),realName:'병렬예약',phone:'01012345678',privacyConsent:true,startsAt,serviceIds:['mens-cut']},null)));
+ assert.deepEqual(responses.map(r=>r.status).sort(),[201,201,409]);
+ const stored=JSON.parse(String(sqlite.prepare('SELECT state FROM shops WHERE id=?').get(id)!.state));assert.equal(new Set(stored.reservations.map((r:{allocation:{staffId:string}})=>r.allocation.staffId)).size,2);
+ assert.ok(!JSON.stringify((await request(`/api/salons/${id}`,'GET',undefined,null)).data).includes('staff'));
+ }finally{sqlite.close();}
+});
+
+test('AI interview call is mocked, stores draft only, and enforces per-shop cooldown',async()=>{
+ let calls=0;const profile=(await import('../lib/scheduler.ts')).initialProfile(makeShop('owner'));
+ const fake=(async()=>{calls++;return Response.json({status:'completed',output:[{content:[{type:'output_text',text:JSON.stringify({profile,summary:'초안입니다',questions:[]})}]}]});}) as typeof fetch;
+ const {sqlite,request}=fixture({masterUserIds:[],schedulerAI:{key:'never-output-test-key',model:'test-model',fetcher:fake}});try{
+ const id=(await request('/api/salons')).data.shops[0].id,endpoint=`/api/salons/${id}/scheduler`;
+ const result=await request(endpoint,'POST',{action:'interview',interview:'직원 한 명이 근무해요.'});assert.equal(result.status,200);assert.equal(calls,1);
+ const state=JSON.parse(String(sqlite.prepare('SELECT state FROM shops WHERE id=?').get(id)!.state)).scheduler;assert.equal(state.active,undefined);assert.equal(state.version,0);
+ assert.equal((await request(endpoint,'POST',{action:'interview',interview:'다시 분석해요.'})).status,429);assert.equal(calls,1);
+ assert.ok(!JSON.stringify(result.data).includes('never-output-test-key'));
  }finally{sqlite.close();}
 });

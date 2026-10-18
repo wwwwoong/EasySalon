@@ -1,6 +1,7 @@
+import {allocationFor,selectedStages,type Allocation} from './scheduler.ts';
 import {addTicket,DomainError,parseReportRange,validCapability,type Shop,type Ticket} from './domain.ts';
 export type BookingSettings={enabled:boolean;weekdays:number[];startTime:string;endTime:string;interval:number;noticeMinutes:number};
-export type Reservation={id:string;token:string;requestId:string;signature:string;realName:string;phone:string;startsAt:number;endsAt:number;createdAt:number;status:'booked'|'cancelled'|'checkedIn'|'noShow';ticketId?:string;items:Ticket['items'];total:number;duration:number;hair?:Ticket['hair'];consult:boolean};
+export type Reservation={allocation?:Allocation;serviceIds?:string[];id:string;token:string;requestId:string;signature:string;realName:string;phone:string;startsAt:number;endsAt:number;createdAt:number;status:'booked'|'cancelled'|'checkedIn'|'noShow';ticketId?:string;items:Ticket['items'];total:number;duration:number;hair?:Ticket['hair'];consult:boolean};
 export const defaultBookingSettings:BookingSettings={enabled:false,weekdays:[1,2,3,4,5],startTime:'10:00',endTime:'19:00',interval:30,noticeMinutes:60};
 export const bookingSettings=(shop:Shop):BookingSettings=>structuredClone(shop.settings.reservations??defaultBookingSettings);
 export const koreaDay=(time:number)=>new Date(time+9*3600000).toISOString().slice(0,10);
@@ -18,14 +19,14 @@ export function availability(shop:Shop,date:unknown,serviceIds:unknown,now=Date.
  const settings=bookingSettings(shop);const range=parseReportRange(date,date);const day=String(date);
  const diff=(range.start-Date.parse(koreaDay(now)+'T00:00:00+09:00'))/86400000;
  if(diff<0||diff>60)throw new DomainError('예약 날짜는 오늘부터 60일 이내로 선택해 주세요.');
- const duration=menuSnapshot(shop,{serviceIds},now).duration;
+ const snapshot=menuSnapshot(shop,{serviceIds},now);const profile=shop.state.scheduler?.active;const advanced=profile?.enabled;const ids=serviceIds as string[];const duration=advanced?selectedStages(profile,ids).reduce((sum,s)=>sum+s.minutes,0)+profile.bufferMinutes:snapshot.duration;
  const weekday=new Date(range.start+9*3600000).getUTCDay();
  const reason=!settings.enabled?'이 매장은 현재 예약을 받지 않아요.':!settings.weekdays.includes(weekday)?'이 요일은 예약 없이 방문 접수로 운영해요.':'';
  const slots:number[]=[];
  if(!reason)for(let minute=minutes(settings.startTime);minute+duration<=minutes(settings.endTime);minute+=settings.interval){
  const start=range.start+minute*60000,end=start+duration*60000;
  if(start<now+settings.noticeMinutes*60000||start<=now)continue;
- if((shop.state.reservations??[]).some(r=>['booked','checkedIn'].includes(r.status)&&r.startsAt<end&&r.endsAt>start))continue;
+ if(advanced){if(!allocationFor(shop,profile,ids,start,shop.state.scheduler!.version))continue;}else if((shop.state.reservations??[]).some(r=>['booked','checkedIn'].includes(r.status)&&r.startsAt<end&&r.endsAt>start))continue;
  slots.push(start);
  }
  return {settings,date:day,duration,slots,reason};
@@ -43,8 +44,8 @@ export function addReservation(shop:Shop,input:Record<string,unknown>,now=Date.n
  if((shop.state.reservations?.length??0)>=2000)throw new DomainError('예약 기록 한도에 도달했습니다. 매장에 문의해 주세요.',409);
  const day=koreaDay(input.startsAt),open=availability(shop,day,input.serviceIds,now);
  if(!open.slots.includes(input.startsAt))throw new DomainError(open.reason||'이미 예약되었거나 선택할 수 없는 시간입니다. 다른 시간을 골라 주세요.',409);
- const snapshot=menuSnapshot(shop,input,now);
- const reservation:Reservation={id:crypto.randomUUID(),token:crypto.randomUUID()+crypto.randomUUID(),requestId:input.requestId,signature,realName:input.realName.trim(),phone,startsAt:input.startsAt,endsAt:input.startsAt+snapshot.duration*60000,createdAt:now,status:'booked',items:snapshot.items,total:snapshot.total,duration:snapshot.duration,hair:snapshot.hair,consult:true};
+ const snapshot=menuSnapshot(shop,input,now);const profile=shop.state.scheduler?.active;const allocation=profile?.enabled?allocationFor(shop,profile,input.serviceIds as string[],input.startsAt,shop.state.scheduler!.version):undefined;if(profile?.enabled&&!allocation)throw new DomainError('담당자 또는 시설이 먼저 예약되었습니다. 다른 시간을 골라 주세요.',409);
+ const reservation:Reservation={allocation:allocation??undefined,serviceIds:input.serviceIds as string[],id:crypto.randomUUID(),token:crypto.randomUUID()+crypto.randomUUID(),requestId:input.requestId,signature,realName:input.realName.trim(),phone,startsAt:input.startsAt,endsAt:input.startsAt+open.duration*60000,createdAt:now,status:'booked',items:snapshot.items,total:snapshot.total,duration:open.duration,hair:snapshot.hair,consult:true};
  (shop.state.reservations??=[]).push(reservation);return reservation;
 }
 export function reservationReceipt(shop:Shop,r:Reservation){const ticket=shop.state.tickets.find(t=>t.id===r.ticketId);return {token:r.token,realName:r.realName,phoneMasked:r.phone.slice(0,3)+'-****-'+r.phone.slice(-4),startsAt:r.startsAt,endsAt:r.endsAt,status:r.status,items:r.items,total:r.total,duration:r.duration,shop:{id:shop.id,name:shop.name},...(ticket?{ticketToken:ticket.token,ticketStatus:ticket.status}:{} )};}
@@ -62,7 +63,7 @@ export function manageReservation(shop:Shop,input:Record<string,unknown>,now=Dat
  if(r.status!=='booked')throw new DomainError('취소·미방문 예약은 방문 처리할 수 없습니다.',409);
  if(koreaDay(now)!==koreaDay(r.startsAt)||now<r.startsAt-30*60000)throw new DomainError('예약 당일, 예약 시간 30분 전부터 방문 처리할 수 있습니다.',409);
  if(shop.state.tickets.length>=2000)throw new DomainError('접수 기록 한도에 도달했습니다.',409);
- const ticket:Ticket={id:crypto.randomUUID(),token:crypto.randomUUID()+crypto.randomUUID(),requestId:r.id,requestSignature:'reservation:'+r.id,number:shop.state.nextNumber++,displayName:r.realName,status:'waiting',queueOrder:Math.max(0,...shop.state.tickets.map(t=>t.queueOrder??0))+1,items:structuredClone(r.items),total:r.total,duration:r.duration,hair:r.hair,consult:r.consult,createdAt:now,audit:[{at:now,action:'reservation-check-in'}]};
+ const ticket:Ticket={...(r.allocation?{staffLabel:r.allocation.staffLabel,stages:r.allocation.stages.map(s=>({name:s.name,minutes:(s.end-s.start)/60000,needsStaff:!!s.staffId,resource:s.resource}))}:{}),staffId:r.allocation?.staffId,serviceIds:r.serviceIds,id:crypto.randomUUID(),token:crypto.randomUUID()+crypto.randomUUID(),requestId:r.id,requestSignature:'reservation:'+r.id,number:shop.state.nextNumber++,displayName:r.realName,status:'waiting',queueOrder:Math.max(0,...shop.state.tickets.map(t=>t.queueOrder??0))+1,items:structuredClone(r.items),total:r.total,duration:r.duration,hair:r.hair,consult:r.consult,createdAt:now,audit:[{at:now,action:'reservation-check-in'}]};
  shop.state.tickets.push(ticket);r.ticketId=ticket.id;r.status='checkedIn';return;
  }
  throw new DomainError('예약 작업을 확인해 주세요.');
